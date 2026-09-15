@@ -12,7 +12,7 @@ categories = ["command-line-utilities"]
 [dependencies]
 clap = { version = "4.0", features = ["derive"] }
 crossterm = "0.27"
-syntect = "5.1"
+syntect = { version = "5.1", default-features = false, features = ["default-fancy"] }
 anyhow = "1.0"
 
 [dev-dependencies]
