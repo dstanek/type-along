@@ -1,9 +1,9 @@
 [workspace]
 # This is a binary, not a library: never publish to crates.io. Releases are
-# GitHub releases with binaries attached by cargo-dist.
+# GitHub releases with binaries attached by cargo-dist. release-plz only
+# pushes the tag; cargo-dist creates the release, so the two never collide.
 publish = false
-git_release_enable = true
+git_release_enable = false
 git_tag_enable = true
 git_tag_name = "v{{ version }}"
-git_release_name = "v{{ version }}"
 changelog_update = true
