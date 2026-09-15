@@ -1,0 +1,53 @@
+name: release-plz
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+  contents: write
+
+jobs:
+  # Tags the commit and creates the GitHub release once a release PR has
+  # been merged. Pushing the tag is what triggers release.yml (cargo-dist)
+  # to build and attach the binaries.
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          # A personal access token, not GITHUB_TOKEN: tags pushed with the
+          # default token do not trigger other workflows, so the binary
+          # build in release.yml would never run.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+  # Opens or updates the single release PR with the version bump and
+  # changelog computed from conventional commits since the last tag.
+  release-pr:
+    name: release PR
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-plz-pr
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # Same reason as above: a PR opened with GITHUB_TOKEN gets no CI run.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
