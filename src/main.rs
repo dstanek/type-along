@@ -22,7 +22,10 @@ use syntect::{
 
 #[derive(Parser)]
 #[command(name = "type-along")]
-#[command(about = "A typing practice application using an existing file")]
+#[command(
+    version,
+    about = "A typing practice application using an existing file"
+)]
 struct Args {
     #[arg(help = "File to practice typing with")]
     file: PathBuf,
