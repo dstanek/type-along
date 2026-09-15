@@ -40,6 +40,7 @@ const FIXTURE_FILES: &[(&str, &str)] = &[
         "// a comment\nfn my_function(x: i32) -> i32 { let s = \"a string\"; return x; }",
     ),
     ("tiny.txt", "a"),
+    ("leading_ws.txt", "   a"),
 ];
 
 fn fixtures_dir() -> &'static Path {
@@ -671,6 +672,14 @@ fn error_reading_file_after_raw_mode_still_restores_terminal() {
         !contains(&out, b"Keys pressed"),
         "an error must not trigger the end-of-run stats report either"
     );
+    assert!(
+        !contains(&out, b"Accuracy"),
+        "an error must not print the accuracy field either (PRD-accuracy-and-wpm.md)"
+    );
+    assert!(
+        !contains(&out, b"WPM"),
+        "an error must not print the WPM field either (PRD-accuracy-and-wpm.md)"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -1067,6 +1076,222 @@ fn wrong_enter_counts_as_mistake_and_key() {
     s.send(b"\x1b"); // Esc
 
     let out = s.wait_for("Keys pressed: 1, Mistakes: 1");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// =====================================================================
+// Accuracy and WPM (see docs/PRD-accuracy-and-wpm.md, Test Plan). Reuses
+// the same harness and helpers above for the reasons documented at the
+// top of the end-of-run-report section - no new test file, no lib target.
+// =====================================================================
+
+/// Parses the number immediately following `prefix` (through the next
+/// character that isn't a digit or '.') out of the last occurrence of
+/// `prefix` in the captured output. Plain string split/parse, per the
+/// PRD's Test Plan - no regex crate needed.
+fn parse_number_after(out: &[u8], prefix: &str) -> f64 {
+    let text = String::from_utf8_lossy(out);
+    let idx = text.rfind(prefix).unwrap_or_else(|| {
+        panic!("expected {prefix:?} in output\n--- captured output ---\n{text}")
+    });
+    let rest = &text[idx + prefix.len()..];
+    let num_str: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    num_str
+        .parse::<f64>()
+        .unwrap_or_else(|e| panic!("failed to parse {num_str:?} after {prefix:?}: {e}"))
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #1 / #6: two misses then the correct character on a
+// one-character file (same setup as
+// `wrong_keypresses_before_correct_count_as_mistakes_and_keys`:
+// keys_pressed = 3, mistakes = 2). Accuracy is deterministic from the
+// counters alone and doesn't round evenly (33.33...% -> 33.3%), so assert
+// the exact substring.
+// ---------------------------------------------------------------------
+#[test]
+fn completion_with_mistakes_reports_exact_rounded_accuracy() {
+    // fixture: "a"
+    let mut s = Session::spawn(&fixture("tiny.txt"));
+    s.wait_for("(0/1)");
+
+    s.send_str("z");
+    s.wait_for("[miss 1/3]");
+    s.send_str("z");
+    s.wait_for("[miss 2/3]");
+    s.send_str("a");
+
+    let out = s.wait_for("Keys pressed: 3, Mistakes: 2");
+    assert!(
+        contains(&out, b"Accuracy: 33.3%"),
+        "expected (3-2)/3 = 33.3% exactly, got: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert_completion_after_restore(&out);
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #2 / UC-2: completing a small file with zero mistakes
+// reports exactly 100.0% accuracy and a strictly positive WPM (some real
+// time elapsed and at least one correct Char attempt occurred). WPM is
+// timing-dependent in a PTY test, so only its sign is asserted, never a
+// specific value.
+// ---------------------------------------------------------------------
+#[test]
+fn completion_with_zero_mistakes_reports_full_accuracy_and_positive_wpm() {
+    // fixture: "ab" - two correct keypresses, no mistakes.
+    let mut s = Session::spawn(&fixture("basic.txt"));
+    s.wait_for("(0/2)");
+
+    s.send_str("a");
+    s.wait_for("50% (1/2)");
+    s.send_str("b");
+
+    let out = s.wait_for("Keys pressed: 2, Mistakes: 0");
+    assert!(
+        contains(&out, b"Accuracy: 100.0%"),
+        "expected exactly 100.0% accuracy with zero mistakes"
+    );
+    let wpm = parse_number_after(&out, "WPM: ");
+    assert!(
+        wpm > 0.0,
+        "expected a strictly positive WPM after a completed run with correct keystrokes, got {wpm}"
+    );
+    assert_completion_after_restore(&out);
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #3 / UC-4: quitting immediately, before any keypress that
+// could start the timer, reports deterministic 100.0% accuracy (no
+// mistakes possible with zero keys_pressed) and exactly 0.0 WPM (the
+// timer never started) - despite being a PTY test, both fields here are
+// deterministic, so assert the exact substring.
+// ---------------------------------------------------------------------
+#[test]
+fn immediate_quit_reports_full_accuracy_and_zero_wpm() {
+    let mut s = Session::spawn(&fixture("basic.txt"));
+    s.wait_for("(0/2)");
+
+    s.send(b"\x1b"); // Esc, immediately - no typing attempt of any kind
+    let out = s.wait_for("Keys pressed: 0, Mistakes: 0");
+    assert!(
+        contains(&out, b"Accuracy: 100.0%, WPM: 0.0"),
+        "expected the exact deterministic tail for an immediate quit, got: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #4 / UC-5: the user's only input is a Tab whitespace-skip
+// over *leading* whitespace - it starts the timer (real time elapses
+// before the quit keypress) but contributes nothing to correct_chars, so
+// WPM must still read exactly 0.0. This is the one case worth a dedicated
+// test per the PRD: a running timer alone doesn't guarantee a nonzero
+// WPM. `basic.txt`/`ws.txt` don't start with whitespace (their first
+// character must be typed before a Tab there would be a real
+// whitespace-skip rather than the UC-6 no-op), so this uses a dedicated
+// `leading_ws.txt` fixture ("   a") whose very first character is
+// whitespace, matching the PRD's "leading whitespace" description
+// literally.
+// ---------------------------------------------------------------------
+#[test]
+fn tab_only_whitespace_skip_starts_timer_but_wpm_stays_zero() {
+    // fixture: "   a" - three leading spaces, then 'a'.
+    let mut s = Session::spawn(&fixture("leading_ws.txt"));
+    s.wait_for("(0/4)");
+
+    s.send(b"\t"); // whitespace-skip over all three leading spaces
+    s.wait_for("75% (3/4)");
+
+    s.send(b"\x1b"); // Esc: quit without ever typing a character
+    let out = s.wait_for("Keys pressed: 1, Mistakes: 0");
+    assert!(
+        contains(&out, b"Accuracy: 100.0%"),
+        "one keys_pressed, zero mistakes -> 100.0% accuracy"
+    );
+    assert!(
+        contains(&out, b"WPM: 0.0"),
+        "correct_chars is 0 (Tab doesn't count), so WPM must be exactly 0.0 \
+         even though the whitespace-skip started the timer, got: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #5 / UC-3: quitting early after a single wrong keypress
+// reports partial, exact accuracy (0.0%, since the lone keys_pressed was
+// also the lone mistake) and exactly 0.0 WPM - a single wrong keypress
+// contributes nothing to correct_chars, so the numerator is
+// deterministically zero regardless of elapsed time.
+// ---------------------------------------------------------------------
+#[test]
+fn early_quit_after_mistake_reports_zero_accuracy_and_zero_wpm() {
+    let mut s = Session::spawn(&fixture("basic.txt")); // "ab"
+    s.wait_for("(0/2)");
+
+    s.send_str("z"); // wrong keypress against 'a'
+    s.wait_for("[miss 1/3]");
+    s.send(b"\x1b"); // Esc
+
+    let out = s.wait_for("Keys pressed: 1, Mistakes: 1");
+    assert!(
+        contains(&out, b"Accuracy: 0.0%"),
+        "expected (1-1)/1 = 0.0% exactly, got: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        contains(&out, b"WPM: 0.0"),
+        "a single wrong keypress contributes nothing to correct_chars, so \
+         WPM must be exactly 0.0, got: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// A full three-strike sequence (strike-out on the 3rd miss) is a real
+// typing attempt like any other, so it still contributes to accuracy the
+// same way ordinary misses do: 3 keys_pressed, 3 mistakes -> 0.0%
+// accuracy, and the struck-out advance is not a "correct" attempt, so it
+// contributes nothing to correct_chars either.
+// ---------------------------------------------------------------------
+#[test]
+fn full_strike_out_sequence_reports_zero_accuracy_and_zero_wpm() {
+    // fixture: "abc"
+    let mut s = Session::spawn(&fixture("abc.txt"));
+    s.wait_for("(0/3)");
+
+    s.send_str("x");
+    s.wait_for("[miss 1/3]");
+    s.send_str("y");
+    s.wait_for("[miss 2/3]");
+    s.send_str("z");
+    s.wait_for("33% (1/3)"); // strike-out on 'a', advanced to 'b'
+
+    s.send(b"\x1b"); // Esc: quit early rather than complete the file
+    let out = s.wait_for("Keys pressed: 3, Mistakes: 3");
+    assert!(
+        contains(&out, b"Accuracy: 0.0%"),
+        "expected (3-3)/3 = 0.0% exactly, got: {}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        contains(&out, b"WPM: 0.0"),
+        "a strike-out advance is not a correct attempt, so correct_chars \
+         stays 0 and WPM must be exactly 0.0, got: {}",
+        String::from_utf8_lossy(&out)
+    );
     assert!(!contains(&out, b"Congratulations"));
     assert!(s.wait_exit_success(Duration::from_secs(3)));
 }

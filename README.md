@@ -66,12 +66,18 @@ character position, and the miss counter when one is pending.
 Finishing the whole file prints `Congratulations! You've completed the
 file.` after the terminal is restored, so it lands in your normal scrollback
 rather than the alternate screen. Quitting early (`Esc`, `Ctrl-X`, or
-`Ctrl-C`) skips this message. Either way, a `Keys pressed: {n}, Mistakes: {m}`
-line follows in the default terminal color — on completion it's the line
-after the congratulations message, on early quit it's the only line printed.
-Keys pressed counts real typing attempts (characters, `Enter`, and each `Tab`
-whitespace-skip); mistakes counts every wrong keypress, including all three
-misses of a strike-out. Neither line prints if the app exited with an error.
+`Ctrl-C`) skips this message. Either way, a `Keys pressed: {n}, Mistakes: {m},
+Accuracy: {a}%, WPM: {w}` line follows in the default terminal color — on
+completion it's the line after the congratulations message, on early quit
+it's the only line printed. Keys pressed counts real typing attempts
+(characters, `Enter`, and each `Tab` whitespace-skip); mistakes counts every
+wrong keypress, including all three misses of a strike-out. Accuracy is the
+percentage of keys pressed that were correct (`100.0%` if nothing was
+pressed yet, rather than a divide-by-zero). WPM is words per minute using
+the standard five-characters-per-word convention, counting only characters
+typed correctly (Tab skips and struck-out characters don't count) over the
+time from your first typing attempt to exit — `0.0` if you never typed
+anything. Neither line prints if the app exited with an error.
 
 ## Current state
 
@@ -79,8 +85,8 @@ This is a work in progress against `REQUIREMENTS.md`. Not yet implemented:
 
 - Multiple files in one session (`type-along a.md b.rs`)
 - Scrolling — only the lines that fit on screen are shown
-- WPM / CPS timing and the per-character mistake report (the end-of-run
-  report currently shows only total keys pressed and total mistakes)
+- CPS timing and the per-character mistake report (the end-of-run report
+  now includes WPM alongside keys pressed, mistakes, and accuracy)
 
 ## License
 

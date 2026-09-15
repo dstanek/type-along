@@ -12,6 +12,7 @@ use std::{
     fs,
     io::{Write, stdout},
     path::PathBuf,
+    time::Instant,
 };
 use syntect::{
     easy::HighlightLines,
@@ -38,6 +39,9 @@ struct TypingSession {
     completed: bool, // set when the file was finished; printed after the terminal is restored
     keys_pressed: usize, // real typing attempts only: Char/Enter attempts plus whitespace-skipping Tab presses
     mistakes: usize, // every wrong Char/Enter attempt, including all misses in a strike-out sequence
+    start_time: Option<Instant>, // set on the first typing attempt of any kind; None means the timer never started
+    end_time: Option<Instant>, // set once the session-ending keypress is recognized, before terminal restore
+    correct_chars: usize,      // correct Char/Enter attempts only, used for WPM
 }
 
 impl TypingSession {
@@ -56,6 +60,9 @@ impl TypingSession {
             completed: false,
             keys_pressed: 0,
             mistakes: 0,
+            start_time: None,
+            end_time: None,
+            correct_chars: 0,
         })
     }
 
@@ -225,6 +232,10 @@ impl TypingSession {
         // caller already checked the current char is whitespace), so this
         // counts once per Tab press regardless of how many characters it skips.
         self.keys_pressed += 1;
+        // A whitespace-skip is a typing attempt too - it can be the first
+        // one of the session, so it starts the timer just like the first
+        // Char/Enter attempt below.
+        self.start_time.get_or_insert_with(Instant::now);
 
         let chars: Vec<char> = self.current_content.chars().collect();
         let start_position = self.current_position;
@@ -388,6 +399,7 @@ impl TypingSession {
         // Every call here is a real typing attempt (Char or Enter evaluated
         // against the expected character), win or lose.
         self.keys_pressed += 1;
+        self.start_time.get_or_insert_with(Instant::now);
 
         if !matches {
             return self.record_incorrect_attempt();
@@ -395,6 +407,7 @@ impl TypingSession {
 
         self.current_position += 1;
         self.incorrect_attempts = 0;
+        self.correct_chars += 1;
 
         // Update just the typed character to normal color
         self.update_just_typed_character()?;
@@ -535,6 +548,30 @@ impl TypingSession {
         Ok(())
     }
 
+    // Percentage of keys_pressed that were not mistakes. keys_pressed == 0
+    // means nothing was typed incorrectly (nothing was typed at all), so
+    // 100.0 rather than a division by zero.
+    fn accuracy_percent(&self) -> f64 {
+        if self.keys_pressed == 0 {
+            return 100.0;
+        }
+        (self.keys_pressed - self.mistakes) as f64 / self.keys_pressed as f64 * 100.0
+    }
+
+    // Words per minute, using the standard 5-chars-per-word convention.
+    // 0.0 if the timer never started (no typing attempt of any kind) or if
+    // no time had elapsed - both would otherwise divide by zero.
+    fn wpm(&self) -> f64 {
+        let (Some(start), Some(end)) = (self.start_time, self.end_time) else {
+            return 0.0;
+        };
+        let elapsed_minutes = end.duration_since(start).as_secs_f64() / 60.0;
+        if elapsed_minutes == 0.0 {
+            return 0.0;
+        }
+        (self.correct_chars as f64 / 5.0) / elapsed_minutes
+    }
+
     // Printed once, after run() has restored the terminal, alongside (or in
     // place of) show_completion_message - see the call site in run() for the
     // exact conditions. Plain default color: this is a data line, not the
@@ -542,8 +579,11 @@ impl TypingSession {
     // congratulations text.
     fn show_stats_report(&self) -> Result<()> {
         println!(
-            "Keys pressed: {}, Mistakes: {}",
-            self.keys_pressed, self.mistakes
+            "Keys pressed: {}, Mistakes: {}, Accuracy: {:.1}%, WPM: {:.1}",
+            self.keys_pressed,
+            self.mistakes,
+            self.accuracy_percent(),
+            self.wpm()
         );
         stdout().flush()?;
         Ok(())
@@ -618,6 +658,10 @@ impl TypingSession {
         loop {
             if let Event::Key(key) = event::read()? {
                 if !self.handle_keypress(key)? {
+                    // Snapshot the end time here, before terminal restore
+                    // and reporting in run(), so I/O-flush and teardown
+                    // time doesn't leak into the elapsed duration used by wpm().
+                    self.end_time.get_or_insert_with(Instant::now);
                     break;
                 }
             }
