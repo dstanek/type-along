@@ -36,6 +36,8 @@ struct TypingSession {
     incorrect_attempts: usize, // consecutive wrong keypresses at current_position
     struck_out_positions: HashSet<usize>, // positions force-advanced past; render red forever
     completed: bool, // set when the file was finished; printed after the terminal is restored
+    keys_pressed: usize, // real typing attempts only: Char/Enter attempts plus whitespace-skipping Tab presses
+    mistakes: usize, // every wrong Char/Enter attempt, including all misses in a strike-out sequence
 }
 
 impl TypingSession {
@@ -52,6 +54,8 @@ impl TypingSession {
             incorrect_attempts: 0,
             struck_out_positions: HashSet::new(),
             completed: false,
+            keys_pressed: 0,
+            mistakes: 0,
         })
     }
 
@@ -217,6 +221,11 @@ impl TypingSession {
     }
 
     fn skip_whitespace(&mut self) -> Result<()> {
+        // Called only when a whitespace-skip is actually happening (the
+        // caller already checked the current char is whitespace), so this
+        // counts once per Tab press regardless of how many characters it skips.
+        self.keys_pressed += 1;
+
         let chars: Vec<char> = self.current_content.chars().collect();
         let start_position = self.current_position;
 
@@ -376,6 +385,10 @@ impl TypingSession {
     // Shared match/mismatch handling for a keypress evaluated against the
     // expected character at current_position (used by both Char and Enter).
     fn handle_expected_char_attempt(&mut self, matches: bool) -> Result<bool> {
+        // Every call here is a real typing attempt (Char or Enter evaluated
+        // against the expected character), win or lose.
+        self.keys_pressed += 1;
+
         if !matches {
             return self.record_incorrect_attempt();
         }
@@ -404,6 +417,7 @@ impl TypingSession {
     // suppressed) is outside the app's control, so no bell is rung.
     fn record_incorrect_attempt(&mut self) -> Result<bool> {
         self.incorrect_attempts += 1;
+        self.mistakes += 1;
 
         if self.incorrect_attempts < 3 {
             // No advance, no redraw - just surface the updated miss count.
@@ -521,6 +535,20 @@ impl TypingSession {
         Ok(())
     }
 
+    // Printed once, after run() has restored the terminal, alongside (or in
+    // place of) show_completion_message - see the call site in run() for the
+    // exact conditions. Plain default color: this is a data line, not the
+    // celebratory message, so it stays visually distinct from the green
+    // congratulations text.
+    fn show_stats_report(&self) -> Result<()> {
+        println!(
+            "Keys pressed: {}, Mistakes: {}",
+            self.keys_pressed, self.mistakes
+        );
+        stdout().flush()?;
+        Ok(())
+    }
+
     fn run(&mut self) -> Result<()> {
         // If we panic once the alternate screen / raw mode is active, the
         // normal restore below never runs - the terminal is left in raw
@@ -559,6 +587,12 @@ impl TypingSession {
         if self.completed {
             self.show_completion_message()?;
         }
+
+        // Printed on both completion and early quit (Esc/Ctrl-X/Ctrl-C),
+        // independent of self.completed - only suppressed when event_loop()
+        // returned an error, matching the guard on show_completion_message
+        // above but without the `self.completed` condition.
+        self.show_stats_report()?;
 
         Ok(())
     }

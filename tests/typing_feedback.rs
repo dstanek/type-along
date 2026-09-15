@@ -667,6 +667,10 @@ fn error_reading_file_after_raw_mode_still_restores_terminal() {
         !contains(&out, b"Congratulations"),
         "an error must not trigger the completion message"
     );
+    assert!(
+        !contains(&out, b"Keys pressed"),
+        "an error must not trigger the end-of-run stats report either"
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -785,4 +789,284 @@ fn dim_rendering_matches_c_over_2_plus_40_formula() {
             "{scope}: expected dimmed RGB ({er},{eg},{eb}) from c/2+40 not found in output"
         );
     }
+}
+
+// =====================================================================
+// End-of-run report (see docs/PRD-end-of-run-report.md, Test Plan).
+//
+// Added here rather than a new `tests/end_of_run_report.rs` file: the
+// `Session` harness, fixture helpers, and byte-stream assertion helpers
+// above (`wait_for`, `contains`, `find_last`, `assert_completion_after_restore`,
+// etc.) are private items in this file's own test binary. Each file under
+// `tests/` compiles as an independent crate, so sharing them with a new
+// file would require extracting a `tests/common/mod.rs` module - a bigger
+// structural change than "add tests" calls for, and the crate deliberately
+// has no lib target for tests to depend on (see the file-level doc comment
+// above). Reusing the harness in place, in this file, is the smaller,
+// correct change.
+// =====================================================================
+
+/// Finds the exact stats line and asserts it comes after `after` (an
+/// already-located byte offset), mirroring the ordering check
+/// `assert_completion_after_restore` does for the alt-screen restore.
+fn assert_stats_line_after(out: &[u8], expected: &str, after: usize, after_desc: &str) {
+    let stats_idx = find_last(out, expected.as_bytes()).unwrap_or_else(|| {
+        panic!(
+            "expected stats line {expected:?} not found in output\n--- captured output ---\n{}",
+            String::from_utf8_lossy(out)
+        )
+    });
+    assert!(
+        stats_idx > after,
+        "stats line {expected:?} must appear after {after_desc}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// PRD UC-2 / Test Plan #2, and the ordering half of Test Plan #1: on a
+// clean completion with zero mistakes, the exact stats line prints,
+// `Mistakes: 0` is never omitted, and it lands after both the
+// alternate-screen restore and the green congratulations line.
+// ---------------------------------------------------------------------
+#[test]
+fn report_after_completion_with_zero_mistakes_and_ordering() {
+    // fixture: "ab" - two correct keypresses, no mistakes.
+    let mut s = Session::spawn(&fixture("basic.txt"));
+    s.wait_for("(0/2)");
+
+    s.send_str("a");
+    s.wait_for("50% (1/2)");
+    s.send_str("b");
+    let out = s.wait_for("Keys pressed: 2, Mistakes: 0");
+
+    assert_completion_after_restore(&out); // restore happens, then congrats
+    let restore_idx = find_last(&out, b"\x1b[?1049l").unwrap();
+    let congrats_idx = find_last(&out, b"Congratulations! You've completed the file.").unwrap();
+    assert_stats_line_after(
+        &out,
+        "Keys pressed: 2, Mistakes: 0",
+        restore_idx,
+        "the alternate-screen restore sequence",
+    );
+    assert_stats_line_after(
+        &out,
+        "Keys pressed: 2, Mistakes: 0",
+        congrats_idx,
+        "the congratulations line",
+    );
+    assert!(
+        s.wait_exit_success(Duration::from_secs(3)),
+        "process should exit cleanly after completion"
+    );
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #1: two misses then the correct character, completing a
+// one-character file. `keys_pressed` counts all three attempts (2 wrong +
+// 1 right); `mistakes` counts just the two wrong ones.
+// ---------------------------------------------------------------------
+#[test]
+fn wrong_keypresses_before_correct_count_as_mistakes_and_keys() {
+    // fixture: "a" - a single character, so two misses then the correct
+    // keypress both records the mistakes and finishes the file.
+    let mut s = Session::spawn(&fixture("tiny.txt"));
+    s.wait_for("(0/1)");
+
+    s.send_str("z");
+    s.wait_for("[miss 1/3]");
+    s.send_str("z");
+    s.wait_for("[miss 2/3]");
+    s.send_str("a");
+
+    let out = s.wait_for("Keys pressed: 3, Mistakes: 2");
+    assert_completion_after_restore(&out);
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// A full three-strike sequence (strike-out on the 3rd miss) contributes
+// exactly 3 to both counters - every miss counts, not just the strike.
+// ---------------------------------------------------------------------
+#[test]
+fn full_strike_out_sequence_counts_three_mistakes_and_three_keys() {
+    // fixture: "abc"
+    let mut s = Session::spawn(&fixture("abc.txt"));
+    s.wait_for("(0/3)");
+
+    s.send_str("x");
+    s.wait_for("[miss 1/3]");
+    s.send_str("y");
+    s.wait_for("[miss 2/3]");
+    s.send_str("z");
+    s.wait_for("33% (1/3)"); // strike-out on 'a', advanced to 'b'
+
+    s.send(b"\x1b"); // Esc: quit early rather than complete the file
+    let out = s.wait_for("Keys pressed: 3, Mistakes: 3");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #7: two full three-miss strike-out sequences (6 wrong
+// keypresses total) both contribute to `mistakes` - not just the two
+// positions that actually got struck out.
+// ---------------------------------------------------------------------
+#[test]
+fn two_strike_out_sequences_count_every_miss() {
+    // fixture: "abc"
+    let mut s = Session::spawn(&fixture("abc.txt"));
+    s.wait_for("(0/3)");
+
+    // Strike out 'a'.
+    s.send_str("x");
+    s.wait_for("[miss 1/3]");
+    s.send_str("y");
+    s.wait_for("[miss 2/3]");
+    s.send_str("z");
+    s.wait_for("33% (1/3)");
+
+    // Strike out 'b'.
+    s.send_str("x");
+    s.wait_for("[miss 1/3]");
+    s.send_str("y");
+    s.wait_for("[miss 2/3]");
+    s.send_str("z");
+    s.wait_for("66% (2/3)");
+
+    s.send(b"\x1b"); // Esc: quit rather than type the remaining 'c'
+    let out = s.wait_for("Keys pressed: 6, Mistakes: 6");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #6: a Tab that skips a run of whitespace counts once
+// toward `keys_pressed`, no matter how many characters it skips.
+// ---------------------------------------------------------------------
+#[test]
+fn tab_whitespace_skip_counts_as_one_key_regardless_of_spaces_skipped() {
+    // fixture: "a   b" - 'a', three spaces, 'b'
+    let mut s = Session::spawn(&fixture("ws.txt"));
+    s.wait_for("(0/5)");
+
+    s.send_str("a");
+    s.wait_for("20% (1/5)");
+    s.send(b"\t"); // skips all three spaces in one press
+    s.wait_for("80% (4/5)");
+
+    s.send(b"\x1b"); // Esc: quit before typing the final 'b'
+    let out = s.wait_for("Keys pressed: 2, Mistakes: 0");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// A Tab pressed on a non-whitespace character is the existing no-op case
+// (UC-6) and must not add to `keys_pressed` either.
+// ---------------------------------------------------------------------
+#[test]
+fn tab_on_non_whitespace_does_not_count_as_key() {
+    let mut s = Session::spawn(&fixture("basic.txt")); // "ab", 'a' is not whitespace
+    s.wait_for("(0/2)");
+
+    s.send(b"\t");
+    s.send(b"\x1b"); // Esc
+    let out = s.wait_for("Keys pressed: 0, Mistakes: 0");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #5: arrow keys and a Ctrl-letter chord never touch either
+// counter.
+// ---------------------------------------------------------------------
+#[test]
+fn ignored_keys_do_not_affect_report_counters() {
+    let mut s = Session::spawn(&fixture("basic.txt")); // "ab"
+    s.wait_for("(0/2)");
+
+    s.send(b"\x1b[C"); // Right arrow
+    s.send(b"\x1b[B"); // Down arrow
+    s.send(b"\x01"); // Ctrl-A
+    s.send(b"\x1b"); // Esc: quit without any real typing attempt
+
+    let out = s.wait_for("Keys pressed: 0, Mistakes: 0");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #4: quitting immediately, before any keypress that could
+// count, still prints the unconditional report showing all zeros.
+// ---------------------------------------------------------------------
+#[test]
+fn esc_quit_with_no_keys_pressed_reports_zeros() {
+    let mut s = Session::spawn(&fixture("basic.txt"));
+    s.wait_for("(0/2)");
+
+    s.send(b"\x1b"); // Esc, immediately
+    let out = s.wait_for("Keys pressed: 0, Mistakes: 0");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// PRD Test Plan #3 / UC-3: quitting early after a mistake still reports
+// the partial counts, and the congratulations line is absent.
+// ---------------------------------------------------------------------
+#[test]
+fn esc_quit_after_mistake_reports_partial_counts_without_congratulations() {
+    let mut s = Session::spawn(&fixture("basic.txt")); // "ab"
+    s.wait_for("(0/2)");
+
+    s.send_str("z"); // wrong keypress against 'a'
+    s.wait_for("[miss 1/3]");
+    s.send(b"\x1b"); // Esc
+
+    let out = s.wait_for("Keys pressed: 1, Mistakes: 1");
+    assert!(
+        !contains(&out, b"Congratulations"),
+        "early quit must not print the completion message"
+    );
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// UC-3, via Ctrl-C instead of Esc: same partial-report behavior on the
+// other quit path.
+// ---------------------------------------------------------------------
+#[test]
+fn ctrl_c_quit_after_mistake_reports_partial_counts_without_congratulations() {
+    let mut s = Session::spawn(&fixture("basic.txt")); // "ab"
+    s.wait_for("(0/2)");
+
+    s.send_str("z"); // wrong keypress against 'a'
+    s.wait_for("[miss 1/3]");
+    s.send(b"\x03"); // Ctrl-C
+
+    let out = s.wait_for("Keys pressed: 1, Mistakes: 1");
+    assert!(
+        !contains(&out, b"Congratulations"),
+        "early quit must not print the completion message"
+    );
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
+}
+
+// ---------------------------------------------------------------------
+// UC-5-adjacent: a wrong Enter (against a non-newline expected char) is a
+// real typing attempt like any other miss - it counts toward both
+// `keys_pressed` and `mistakes`, not just `mistakes`.
+// ---------------------------------------------------------------------
+#[test]
+fn wrong_enter_counts_as_mistake_and_key() {
+    let mut s = Session::spawn(&fixture("basic.txt")); // "ab", expected char is 'a'
+    s.wait_for("(0/2)");
+
+    s.send(b"\r"); // Enter, wrong against 'a'
+    s.wait_for("[miss 1/3]");
+    s.send(b"\x1b"); // Esc
+
+    let out = s.wait_for("Keys pressed: 1, Mistakes: 1");
+    assert!(!contains(&out, b"Congratulations"));
+    assert!(s.wait_exit_success(Duration::from_secs(3)));
 }

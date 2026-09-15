@@ -31,6 +31,12 @@ For example, Markdown documentation or even code.
 - The report of WPM and CPS will be shown when the user completes typing
 - We should also keep track of the mistakes a user makes. So a mapping of missed character to the count of misses. This will help the user understand their weaknesses.
 
+> **Note (implementation divergence):** the shipped first step is a
+> one-line end-of-run report showing total keys pressed and total mistakes
+> made, printed after the terminal is restored on both completion and early
+> quit. The WPM/CPS timer and the per-character mistake map above remain
+> unimplemented.
+
 ## Technology
 
 - This CLI will be written in rust
