@@ -369,11 +369,9 @@ impl TypingSession {
 
         // Create status bar content with progress
         let total_chars = self.current_content.chars().count();
-        let progress_percent = if total_chars > 0 {
-            (self.current_position * 100) / total_chars
-        } else {
-            0
-        };
+        let progress_percent = (self.current_position * 100)
+            .checked_div(total_chars)
+            .unwrap_or(0);
         let mut status_info = format!(
             " {} - {}% ({}/{}) ",
             filename, progress_percent, self.current_position, total_chars
@@ -519,15 +517,15 @@ impl TypingSession {
             }
             KeyCode::Tab => {
                 // Skip all whitespace (spaces and tabs) until next non-whitespace character
-                if let Some(current_char) = self.get_current_char() {
-                    if current_char == ' ' || current_char == '\t' {
-                        self.skip_whitespace()?;
+                if let Some(current_char) = self.get_current_char()
+                    && (current_char == ' ' || current_char == '\t')
+                {
+                    self.skip_whitespace()?;
 
-                        // Check if we've reached the end of the file
-                        if self.current_position >= self.current_content.chars().count() {
-                            self.completed = true;
-                            return Ok(false);
-                        }
+                    // Check if we've reached the end of the file
+                    if self.current_position >= self.current_content.chars().count() {
+                        self.completed = true;
+                        return Ok(false);
                     }
                 }
             }
@@ -659,14 +657,14 @@ impl TypingSession {
 
         // Event loop to capture keypresses
         loop {
-            if let Event::Key(key) = event::read()? {
-                if !self.handle_keypress(key)? {
-                    // Snapshot the end time here, before terminal restore
-                    // and reporting in run(), so I/O-flush and teardown
-                    // time doesn't leak into the elapsed duration used by wpm().
-                    self.end_time.get_or_insert_with(Instant::now);
-                    break;
-                }
+            if let Event::Key(key) = event::read()?
+                && !self.handle_keypress(key)?
+            {
+                // Snapshot the end time here, before terminal restore
+                // and reporting in run(), so I/O-flush and teardown
+                // time doesn't leak into the elapsed duration used by wpm().
+                self.end_time.get_or_insert_with(Instant::now);
+                break;
             }
         }
 
