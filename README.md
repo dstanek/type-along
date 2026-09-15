@@ -9,6 +9,22 @@ The file is rendered with syntax highlighting, dimmed. As you type each
 character correctly it lights up to its normal color, so the screen fills in
 behind you.
 
+## Install
+
+Prebuilt binaries for Linux, macOS, and Windows are attached to each
+[GitHub release](https://github.com/dstanek/type-along/releases). The
+installers below download the right one for your platform:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dstanek/type-along/releases/latest/download/type-along-installer.sh | sh
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/dstanek/type-along/releases/latest/download/type-along-installer.ps1 | iex"
+```
+
+Or build from source, below.
+
 ## Requirements
 
 Rust (edition 2024) and Cargo.
@@ -87,6 +103,23 @@ This is a work in progress against `REQUIREMENTS.md`. Not yet implemented:
 - Scrolling — only the lines that fit on screen are shown
 - CPS timing and the per-character mistake report (the end-of-run report
   now includes WPM alongside keys pressed, mistakes, and accuracy)
+
+## Releasing
+
+Versions are derived from conventional commit messages. On every push to
+`main`, [release-plz](https://release-plz.dev) opens or updates a release
+pull request that bumps the version in `Cargo.toml` and regenerates
+`CHANGELOG.md` from the commits since the last tag (`fix:` bumps patch,
+`feat:` bumps minor, a `!` or `BREAKING CHANGE:` footer bumps major).
+Merging that pull request tags the commit as `vX.Y.Z` and creates the
+GitHub release. The tag triggers [cargo-dist](https://opensource.axo.dev/cargo-dist/)
+to build the binaries for each platform and attach them, along with the
+installers, to the release.
+
+This needs one repository secret, `RELEASE_PLZ_TOKEN`: a personal access
+token with `contents` and `pull-requests` write access. The default
+`GITHUB_TOKEN` cannot be used because tags and pull requests it creates do
+not trigger other workflows.
 
 ## License
 
